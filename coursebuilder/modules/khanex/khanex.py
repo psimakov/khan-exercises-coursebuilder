@@ -1,7 +1,7 @@
 #
 #    Khan Academy Exercises for Course Builder
 #
-#    Copyright (C) 2013 Pavel Simakov (pavel@vokamis.com)
+#    Copy Right (C) 2013 Pavel Simakov (pavel@vokamis.com)
 #    https://github.com/psimakov/khan-exercises-coursebuilder
 #
 #    This library is free software; you can redistribute it and/or
@@ -20,7 +20,7 @@
 #    USA
 #
 
-"""Khan Academy Exercises for Course Builder.
+"""Khan Academy exercises for Course Builder.
 
 
 This extension lets you host Khan Academy exercises in your Course Builder
@@ -31,7 +31,7 @@ easier to embed the exercises and collect the exercise results right in your
 Course Builder course.
 
 Here is how to install, activate and use this module:
-    - download Course Builder (1.4.x)
+    - download Course Builder (1.4.1)
     - download this package
     - copy all files in this package into /modules/khanex/... folder of your
       Course Builder application folder
@@ -40,12 +40,15 @@ Here is how to install, activate and use this module:
           import modules.khanex.khanex
         - enable the module, where all other modules are enabled:
           modules.khanex.khanex.register_module().enable()
-    - restart your local development sever or re-deployyour application
+    - restart your local development sever or re-deploy your application
     - edit a lesson using visual editor; you should be able to add a new
       component type "Khan Academy Exercise"
     - the component editor should show a list of all exercises available in a
-      dropdown list
-    - pick one exercise, save the component configuration, save  the lesson
+      dropdown list; there should be over 400 exercises listed here
+    - pick one exercise, save the component configuration
+    - add empty exercise definition var activity = []; uncheck 'Activity Listed'
+    - save  the lesson
+    - enable gcb_can_persist_activity_events and gcb_can_persist_page_events
     - preview the lesson
     - click "Check Answer" and see how data is recorded in the datastore
       EventEntity table with a namespace appropriate for your course
@@ -56,17 +59,22 @@ WordPress. You can learn more about it here:
   http://www.softwaresecretweapons.com/jspwiki/khan-exercises
 
 Here are the things I found difficult to do while completing this integration:
-    - it is not possible to create a namespaced zip file handler; this is
-      related to sub-optimal URL matching scheme used in sites.py; we only
-      support only two path match expressions: 'starts-with /assets/...' or
-      'is equal to /xyz'; for zip file serving on namespaced URL we need
-      an expression 'starts with /xyz/...'
-    - we do not have a function add_tag_definition(), which allows adding tag
-      dynamically from inside the module; so I had to create an additional file
-      inside /extenstions/... while I already had all my files in /modules/...
-    - we do escape the content of <scrip>...</script> tag; thus it is impossible
-      to have raw JavaScript in the tag; we need to make an exception for
-      <script> to render its TEXT content unescaped
+    - if a unit is marked completed in a progress tracking system, and author
+      adds new unit - the progress indicator is now wrong and must be recomputed
+      to account for a new added unit
+    - why don't we circles next to the lessons of the left nav. of the unit?
+    - how does a tag/module know what unit/lesson is being shown now? we need to
+      pass some kind of course_context into tag/module... how much of view model
+      do we expose to the tag/module? can a tag instance introspect what is
+      above and below it in the rendering context?
+    - we do show "Loading..." indicator while exercise JavaScript loads up,
+      but it is dismissed too early now
+    - tag.render() method must give access to the handler, ideally before the
+      rendering phase begins
+    - our model for tracking progress assumes lesson is an atomic thing; so
+      if one has 3 exercises on one lesson page, only one marker is used and
+      it is not possible to track progress of individual exercises; ideally any
+      container should automatically support progress tracking for its children
 
 We need to improve these over time.
 
@@ -82,7 +90,6 @@ import urlparse
 from xml.etree import cElementTree
 import zipfile
 
-import appengine_config
 from common import schema_fields
 from common import tags
 from controllers import sites
@@ -91,12 +98,8 @@ from models import custom_modules
 from models import models
 from models import transforms
 
-from google.appengine.api import namespace_manager
-
 
 ZIP_FILE = os.path.join(os.path.dirname(__file__), 'khan-exercises.zip')
-RELATIVE_URL_BASE = 'extensions/tags/khanex/resources'
-URL_BASE = '/' + RELATIVE_URL_BASE
 EXERCISE_BASE = 'khan-exercises/khan-exercises/exercises/'
 
 EXERCISE_HTML_PAGE_RAW = (
@@ -176,7 +179,11 @@ class KhanExerciseTag(tags.BaseTag):
 
     @classmethod
     def name(cls):
-        return 'Khan Exercise'
+        return 'Khan Academy Exercise'
+
+    @classmethod
+    def vendor(cls):
+        return 'psimakov'
 
     def render(self, node):
         """Embed just a <script> tag that will in turn create an <iframe>."""
@@ -186,13 +193,17 @@ class KhanExerciseTag(tags.BaseTag):
             """
 <div style='width: 450px;'>
   Khan Academy Exercise: %s
+  <br/>
+  <script>
+    // customize the style of the exercise iframe
+    var ity_ef_style = "width: 750px;";
+  </script>
   <script src="%s" type="text/javascript"></script>
 </div>""" % (
-    cgi.escape(caption),
-    URL_BASE + '/khan-exercises/embed.js?static:%s' % name))
+    cgi.escape(caption), 'khan-exercises/embed.js?static:%s' % name))
 
     def get_schema(self, unused_handler):
-        """Make schema with a list of all exercises by inspecting zip file."""
+        """Make schema with a list of all exercises by inspecting a zip file."""
         zip_file = zipfile.ZipFile(ZIP_FILE)
         exercise_list = []
         for name in zip_file.namelist():
@@ -232,39 +243,35 @@ class KhanExerciseRenderer(utils.BaseHandler):
         html_file = zip_file.open(EXERCISE_BASE + parts[1] + '.html')
         self.response.write(html_file.read())
 
-    def _find_ns_from_context_path(self, context_path):
-        """Finds a course for a given context_path."""
-        if not context_path:
-            return None
-        for course in sites.get_all_courses():
-            if course.slug == context_path:
-                return course
-        return None
-
-    def _record_student_submission(self, context_path, data):
+    def _record_student_submission(self, data):
         """Record data in a specific course namespace."""
-        ns = appengine_config.DEFAULT_NAMESPACE_NAME
-        course = self._find_ns_from_context_path(context_path)
-        if course:
-            ns = course.namespace
+        # get student
+        student = self.personalize_page_and_get_enrolled()
+        if not student:
+            return False
 
-        original_ns = namespace_manager.get_namespace()
-        namespace_manager.set_namespace(ns)
-        try:
-            models.EventEntity.record(
-                'module-khanex.exercise-submit', self.get_user(), data)
-        finally:
-            namespace_manager.set_namespace(original_ns)
+        # record submission
+        models.EventEntity.record(
+            'module-khanex.exercise-submit', self.get_user(), data)
 
-    def _get_origin_context_path(self, data):
-        """Extract lesson context path from the exercise data submission."""
+        # update progress
+        unit_id, lesson_id = self._get_unit_lesson_from(data)
+        self.get_course().get_progress_tracker().put_activity_accessed(
+            student, unit_id, lesson_id)
 
-        # we need to determine what course context_path this submission is for;
-        # to do so we first look at the 'location' of the page showing the
-        # exercise, inside of it we look at the 'ity_ef_origin' showing the
-        # location of the page the exercise was embedded into; from the page
-        # address we extract the context path and locate the course mapped
-        # to it; this is UGLY, but I don't have a better way to do it now
+        return True
+
+    def _get_unit_lesson_from(self, data):
+        """Extract unit and lesson id from exercise data submission."""
+
+        # we need to figure out unit and lesson id for the exercise;
+        # we currently have no direct way of doing it, so we have to do it
+        # indirectly == ugly...; an exercise captures a page URL where it was
+        # embedded; we can parse that URL out and find all the interesting
+        # parts from the query string
+
+        unit_id = 0
+        lesson_id = 0
         json = transforms.loads(data)
         if json:
             location = json.get('location')
@@ -275,23 +282,33 @@ class KhanExerciseRenderer(utils.BaseHandler):
                 if ity_ef_origin:
                     ity_ef_origin = ity_ef_origin[0]
                     origin_path = urlparse.urlparse(ity_ef_origin)
-                    if origin_path.path:
-                        parts = origin_path.path.split('/')
-                        # we may have no context_path: '/unit?...'
-                        if len(parts) == 2 and parts[1] == 'unit':
-                            return '/'
-                        # we may have a context_path: '/course/unit?...'
-                        if len(parts) == 3 and parts[2] == 'unit':
-                            return '/' + parts[1]
-                        raise Exception('Unknown URL path pattern: %s.' % parts)
-        return None
+                    if origin_path.query:
+                        query = urlparse.parse_qs(origin_path.query)
+                        unit_id = self._int_list_to_int(query.get('unit'))
+                        lesson_id = self._int_list_to_int(query.get('lesson'))
+
+                        # when we are on the first lesson of a unit, leson_id is
+                        # not present :(; look it up
+                        if not lesson_id:
+                            lessons = self.get_course().get_lessons(unit_id)
+                            if lessons:
+                                lesson_id = lessons[0].lesson_id
+
+        return unit_id, lesson_id
+
+    def _int_list_to_int(self, list):
+        if list:
+            return int(list[0])
+        return 0
 
     def post(self):
         """Handle POST, i.e. 'Check Answer' button is pressed."""
         data = self.request.get('ity_ef_audit')
-        self._record_student_submission(
-            self._get_origin_context_path(data), data)
-        self.response.write('{}')  # we must return valid JSON
+        if self._record_student_submission(data):
+            self.response.write('{}')  # we must return valid JSON on success
+            return
+
+        self.error(404)
 
     def get(self):
         """Handle GET."""
@@ -317,17 +334,20 @@ custom_module = None
 def register_module():
     """Registers this module in the registry."""
 
-    zip_handler = (URL_BASE + '/(.*)', sites.make_zip_handler(ZIP_FILE))
-    namespaced_zip_handler = (
-        '/khan-exercises/(.*)', sites.make_zip_handler(ZIP_FILE))
-    render_handler = (
-        URL_BASE + '/khan-exercises/khan-exercises/indirect/',
-        KhanExerciseRenderer)
+    # register custom tag
+    tags.Registry.add_tag_binding('khanex', KhanExerciseTag)
 
+    # register handlers
+    zip_handler = (
+        '/khan-exercises', sites.make_zip_handler(ZIP_FILE))
+    render_handler = (
+        '/khan-exercises/khan-exercises/indirect/', KhanExerciseRenderer)
+
+    # register module
     global custom_module
     custom_module = custom_modules.Module(
         'Khan Academy Exercise',
         'A set of pages for delivering Khan Academy Exercises via '
         'Course Builder.',
-        [render_handler, zip_handler], [namespaced_zip_handler])
+        [], [render_handler, zip_handler])
     return custom_module
