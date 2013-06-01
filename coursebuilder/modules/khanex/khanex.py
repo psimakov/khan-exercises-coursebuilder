@@ -266,13 +266,9 @@ class KhanExerciseRenderer(utils.BaseHandler):
     def _record_student_submission(self, data):
         """Record data in a specific course namespace."""
         # get student
-        student = self.personalize_page_and_get_enrolled(
-            supports_transient_student=True)
+        student = self.personalize_page_and_get_enrolled()
         if not student:
             return False
-
-        if student.is_transient:
-            return True
 
         # record submission
         models.EventEntity.record(
