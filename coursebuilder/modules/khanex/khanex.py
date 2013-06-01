@@ -94,10 +94,22 @@ from common import schema_fields
 from common import tags
 from controllers import sites
 from controllers import utils
+from models.config import ConfigProperty
+from models.counters import PerfCounter
 from models import custom_modules
 from models import models
 from models import transforms
 
+
+ATTEMPT_COUNT = PerfCounter(
+    'gcb-khanex-attempt-count',
+    'A number of attempts made by all users on all exercises.')
+
+WHITELISTED_EXERCISES = ConfigProperty(
+    '_khanex_whitelisted', str, (
+        'A white-listed exercises that can be show to students. If this list '
+        'is empty, all exercises are available.'),
+    default_value='', multiline=True)
 
 ZIP_FILE = os.path.join(os.path.dirname(__file__), 'khan-exercises.zip')
 EXERCISE_BASE = 'khan-exercises/khan-exercises/exercises/'
@@ -174,6 +186,13 @@ EXERCISE_HTML_PAGE_RAW = (
 </html>""")
 
 
+def _allowed(name):
+    """Checks if an exercise name is whitelisted for use."""
+    return (
+        not WHITELISTED_EXERCISES.value or
+        name in WHITELISTED_EXERCISES.value)
+
+
 class KhanExerciseTag(tags.BaseTag):
     """Custom tag for embedding Khan Academy Exercises."""
 
@@ -213,9 +232,10 @@ class KhanExerciseTag(tags.BaseTag):
         index = 1
         for url in sorted(exercise_list):
             name = url.replace('.html', '')
-            caption = name.replace('_', ' ')
-            items.append((name, '#%s: %s' % (index, caption)))
-            index += 1
+            if _allowed(name):
+                caption = name.replace('_', ' ')
+                items.append((name, '#%s: %s' % (index, caption)))
+                index += 1
 
         reg = schema_fields.FieldRegistry('Khan Exercises')
         reg.add_property(
@@ -246,9 +266,13 @@ class KhanExerciseRenderer(utils.BaseHandler):
     def _record_student_submission(self, data):
         """Record data in a specific course namespace."""
         # get student
-        student = self.personalize_page_and_get_enrolled()
+        student = self.personalize_page_and_get_enrolled(
+            supports_transient_student=True)
         if not student:
             return False
+
+        if student.is_transient:
+            return True
 
         # record submission
         models.EventEntity.record(
@@ -305,6 +329,7 @@ class KhanExerciseRenderer(utils.BaseHandler):
         """Handle POST, i.e. 'Check Answer' button is pressed."""
         data = self.request.get('ity_ef_audit')
         if self._record_student_submission(data):
+            ATTEMPT_COUNT.inc()
             self.response.write('{}')  # we must return valid JSON on success
             return
 
@@ -321,7 +346,7 @@ class KhanExerciseRenderer(utils.BaseHandler):
             return
 
         # render indirect
-        if slug:
+        if slug and _allowed(slug):
             self._render_indirect(slug)
             return
 
