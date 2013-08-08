@@ -204,7 +204,7 @@ class KhanExerciseTag(tags.BaseTag):
     def vendor(cls):
         return 'psimakov'
 
-    def render(self, node):
+    def render(self, node, unused_handler):
         """Embed just a <script> tag that will in turn create an <iframe>."""
         name = node.attrib.get('name')
         caption = name.replace('_', ' ')
@@ -358,7 +358,7 @@ def register_module():
     # register custom tag
     tags.Registry.add_tag_binding('khanex', KhanExerciseTag)
 
-    # register handlers
+    # register handler
     zip_handler = (
         '/khan-exercises', sites.make_zip_handler(ZIP_FILE))
     render_handler = (
